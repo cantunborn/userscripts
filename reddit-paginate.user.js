@@ -1,8 +1,13 @@
 // ==UserScript==
 // @name         Reddit Remove Infinite Scroll
-// @namespace    reddit-paginate
-// @version      1.14.10
+// @namespace    https://github.com/cantunborn
+// @version      1.14.11
 // @description  Replace infinite scroll with Google-style numbered pages (25 posts per page) on Reddit feeds.
+// @author       cantunborn
+// @license      MIT
+// @homepageURL  https://github.com/cantunborn/userscripts
+// @supportURL   https://github.com/cantunborn/userscripts/issues
+// @icon         data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+CiAgPGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMzAiIGZpbGw9IiMxYTFhMWIiLz4KICA8dGV4dCB4PSIzMiIgeT0iMzIiIGZvbnQtc2l6ZT0iNjAiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGRvbWluYW50LWJhc2VsaW5lPSJjZW50cmFsIiBmaWxsPSIjZmY0NTAwIiBmb250LWZhbWlseT0iQXJpYWwsIEhlbHZldGljYSwgc2Fucy1zZXJpZiIgZm9udC13ZWlnaHQ9ImJvbGQiPiYjODczNDs8L3RleHQ+CiAgPGxpbmUgeDE9IjEwIiB5MT0iNTQiIHgyPSI1NCIgeTI9IjEwIiBzdHJva2U9IiNmZjQ1MDAiIHN0cm9rZS13aWR0aD0iNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIi8+Cjwvc3ZnPgo=
 // @match        https://www.reddit.com/*
 // @run-at       document-start
 // @grant        none
