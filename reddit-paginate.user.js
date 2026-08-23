@@ -11,6 +11,8 @@
 // @match        https://www.reddit.com/*
 // @run-at       document-start
 // @grant        none
+// @downloadURL  https://raw.githubusercontent.com/cantunborn/userscripts/main/reddit-paginate.user.js
+// @updateURL    https://raw.githubusercontent.com/cantunborn/userscripts/main/reddit-paginate.user.js
 // ==/UserScript==
 
 (function () {
