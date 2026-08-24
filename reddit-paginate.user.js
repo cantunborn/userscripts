@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Remove Infinite Scroll
 // @namespace    https://github.com/cantunborn
-// @version      1.14.11
+// @version      1.15
 // @description  Replace infinite scroll with Google-style numbered pages (25 posts per page) on Reddit feeds.
 // @author       cantunborn
 // @license      MIT
@@ -39,17 +39,19 @@
   }
 
   const NativeIntersectionObserver = window.IntersectionObserver;
-  window.IntersectionObserver = function (callback, options) {
-    function wrappedCallback(entries, observer) {
-      const patched = entries.map((e) => {
-        if (!isBlockedSentinel(e.target)) return e;
-        return fakeHiddenEntry(e);
-      });
-      callback(patched, observer);
-    }
-    return new NativeIntersectionObserver(wrappedCallback, options);
-  };
-  window.IntersectionObserver.prototype = NativeIntersectionObserver.prototype;
+  if (NativeIntersectionObserver) {
+    window.IntersectionObserver = function (callback, options) {
+      function wrappedCallback(entries, observer) {
+        const patched = entries.map((e) => {
+          if (!isBlockedSentinel(e.target)) return e;
+          return fakeHiddenEntry(e);
+        });
+        callback(patched, observer);
+      }
+      return new NativeIntersectionObserver(wrappedCallback, options);
+    };
+    window.IntersectionObserver.prototype = NativeIntersectionObserver.prototype;
+  }
 
   const PAGE_SIZE = 25;
   const LOAD_TIMEOUT_MS = 8000;
@@ -78,6 +80,121 @@
     if (/\/comments\//.test(pathname)) return false;
     if (/^\/(message|settings|submit|premium|chat)/.test(pathname)) return false;
     return true;
+  }
+
+  const MAX_SNAPSHOT_BYTES = 3 * 1024 * 1024;
+
+  function navigationType() {
+    try {
+      const entries = performance.getEntriesByType('navigation');
+      if (entries.length) return entries[0].type;
+    } catch (err) {
+      log('navigationType: check failed', err);
+    }
+    return 'navigate';
+  }
+
+  function storageKeySuffix() {
+    return location.pathname + location.search;
+  }
+
+  function pageStorageKey() {
+    return 'reddit-paginate:page:' + storageKeySuffix();
+  }
+
+  function snapshotStorageKey() {
+    return 'reddit-paginate:snapshot:' + storageKeySuffix();
+  }
+
+  function saveCurrentPage() {
+    try {
+      sessionStorage.setItem(pageStorageKey(), String(state.currentPage));
+    } catch (err) {
+      log('saveCurrentPage: failed', err);
+    }
+  }
+
+  function readSavedPage() {
+    try {
+      const raw = sessionStorage.getItem(pageStorageKey());
+      const n = parseInt(raw, 10);
+      return Number.isFinite(n) && n > 1 ? n : null;
+    } catch (err) {
+      log('readSavedPage: failed', err);
+      return null;
+    }
+  }
+
+  function loadSnapshot() {
+    try {
+      const raw = sessionStorage.getItem(snapshotStorageKey());
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (err) {
+      log('loadSnapshot: failed', err);
+      return [];
+    }
+  }
+
+  function appendToSnapshot(post) {
+    const key = snapshotStorageKey();
+    const entries = loadSnapshot();
+    entries.push({ id: post.id, html: wrapperOf(post).outerHTML });
+    let serialized = JSON.stringify(entries);
+    while (serialized.length > MAX_SNAPSHOT_BYTES && entries.length > 1) {
+      entries.shift();
+      serialized = JSON.stringify(entries);
+    }
+    while (entries.length > 0) {
+      try {
+        sessionStorage.setItem(key, serialized);
+        return;
+      } catch (err) {
+        entries.shift();
+        if (entries.length === 0) {
+          log('appendToSnapshot: failed even after evicting everything', err);
+          return;
+        }
+        serialized = JSON.stringify(entries);
+      }
+    }
+  }
+
+  function clearSnapshot() {
+    try {
+      sessionStorage.removeItem(snapshotStorageKey());
+    } catch (err) {
+      log('clearSnapshot: failed', err);
+    }
+  }
+
+  function restoreFromSnapshot(feed) {
+    const entries = loadSnapshot();
+    if (!entries.length) return null;
+
+    const template = document.createElement('template');
+    const restoredWrappers = [];
+    const restoredPosts = [];
+    for (const entry of entries) {
+      template.innerHTML = entry.html;
+      const wrapper = template.content.firstElementChild;
+      if (!wrapper) continue;
+      const post = wrapper.matches('shreddit-post') ? wrapper : wrapper.querySelector('shreddit-post');
+      if (!post) continue;
+      restoredWrappers.push(wrapper);
+      restoredPosts.push(post);
+    }
+    if (!restoredPosts.length) return null;
+
+    feed.querySelectorAll('shreddit-post').forEach((p) => wrapperOf(p).remove());
+
+    const sentinel = feed.querySelector('faceplate-partial[slot="load-after"]');
+    restoredWrappers.forEach((wrapper) => {
+      if (sentinel) sentinel.insertAdjacentElement('beforebegin', wrapper);
+      else feed.appendChild(wrapper);
+    });
+    return restoredPosts;
   }
 
   function wrapperOf(post) {
@@ -110,6 +227,8 @@
   }
 
   function scheduleInit() {
+    const prevFeed = state ? state.feed : null;
+    const prevFirstPostId = state && state.posts[0] ? state.posts[0].id : null;
     teardown();
     if (!isListingPath(location.pathname)) return;
 
@@ -117,7 +236,8 @@
     const tryInit = () => {
       const feed = document.querySelector('shreddit-feed');
       const posts = feed ? Array.from(feed.querySelectorAll('shreddit-post')) : [];
-      if (feed && posts.length > 0) {
+      const stale = feed && feed === prevFeed && posts[0] && posts[0].id === prevFirstPostId;
+      if (feed && posts.length > 0 && !stale) {
         init(feed, posts);
         return;
       }
@@ -133,9 +253,11 @@
 
   async function init(feed, posts) {
     log('init: starting with', posts.length, 'posts');
+    const navType = navigationType();
+
     state = {
       feed,
-      posts: posts.slice(),
+      posts: [],
       currentPage: 1,
       highestPage: 1,
       hasMore: true,
@@ -147,6 +269,16 @@
       openPopup: null,
       observer: null,
     };
+
+    log('init: navType is', navType, 'live posts seen so far', posts.length);
+    const restoredPosts = navType === 'back_forward' ? restoreFromSnapshot(feed) : null;
+    log('init: restoreFromSnapshot returned', restoredPosts ? restoredPosts.length + ' posts' : 'null');
+    if (!restoredPosts) {
+      clearSnapshot();
+      posts.forEach((p) => registerPost(p));
+    } else {
+      state.posts = restoredPosts;
+    }
 
     state.observer = new MutationObserver((mutations) => {
       let added = false;
@@ -174,13 +306,22 @@
     });
     state.observer.observe(feed, { childList: true, subtree: true });
 
-    await ensureLoadedThrough(1);
+    const savedPage = navType === 'back_forward' ? readSavedPage() : null;
+    const target = savedPage || 1;
+    log('init: savedPage is', savedPage, 'target is', target);
+    await ensureLoadedThrough(target);
+    if (state.posts.length > (target - 1) * PAGE_SIZE) {
+      state.currentPage = target;
+      state.highestPage = Math.max(state.highestPage, target);
+    }
+    log('init: done, currentPage is', state.currentPage, 'total posts', state.posts.length);
     reflow();
   }
 
   function registerPost(node) {
-    if (!state || state.posts.includes(node)) return false;
+    if (!state || state.posts.some((p) => p.id === node.id)) return false;
     state.posts.push(node);
+    appendToSnapshot(node);
     return true;
   }
 
@@ -228,9 +369,7 @@
 
   function positionBars() {
     const start = (state.currentPage - 1) * PAGE_SIZE;
-    const firstPost = state.posts[start];
-    const topWrapper = firstPost ? wrapperOf(firstPost) : null;
-
+    const topWrapper = wrapperOf(state.posts[start]);
     const box = getDividerBox(topWrapper);
 
     const lastPost = state.posts[state.posts.length - 1];
@@ -244,7 +383,7 @@
     hideTrailingElements();
 
     const pages = Math.min(totalKnownPages(), state.highestPage);
-    if (topWrapper && pages > 1) {
+    if (pages > 1) {
       topWrapper.insertAdjacentElement('beforebegin', state.topBar);
       applyDividerBox(state.topBar, box);
     } else if (state.topBar.isConnected) {
@@ -490,6 +629,7 @@
   function goPrev() {
     if (state.currentPage <= 1) return;
     state.currentPage--;
+    saveCurrentPage();
     reflow();
     scrollToTopOfFeed();
   }
@@ -497,6 +637,7 @@
   function goToPage(n) {
     if (n === state.currentPage) return;
     state.currentPage = n;
+    saveCurrentPage();
     reflow();
     scrollToTopOfFeed();
   }
@@ -509,6 +650,7 @@
     if (state.posts.length > (target - 1) * PAGE_SIZE) {
       state.currentPage = target;
       state.highestPage = Math.max(state.highestPage, target);
+      saveCurrentPage();
     }
     reflow();
     scrollToTopOfFeed();
@@ -552,12 +694,13 @@
   }
 
   function watchNavigation() {
-    lastPath = location.pathname;
+    lastPath = location.pathname + location.search;
     setInterval(() => {
-      const pathChanged = location.pathname !== lastPath;
+      const currentPath = location.pathname + location.search;
+      const pathChanged = currentPath !== lastPath;
       const feedGone = state && !state.feed.isConnected;
       if (pathChanged || feedGone) {
-        lastPath = location.pathname;
+        lastPath = currentPath;
         scheduleInit();
       }
     }, 500);
@@ -569,7 +712,31 @@
     watchNavigation();
   }
 
-  if (document.readyState === 'loading') {
+  if (typeof module !== 'undefined' && module.exports) {
+    // Test-only export. A userscript manager never defines `module`, so this
+    // branch never runs in the browser, and `start()` never auto-runs under test.
+    module.exports = {
+      PAGE_SIZE,
+      MAX_SNAPSHOT_BYTES,
+      navigationType,
+      pageStorageKey,
+      snapshotStorageKey,
+      saveCurrentPage,
+      readSavedPage,
+      loadSnapshot,
+      appendToSnapshot,
+      clearSnapshot,
+      restoreFromSnapshot,
+      registerPost,
+      scheduleInit,
+      watchNavigation,
+      totalKnownPages,
+      applyVisibility,
+      wrapperOf,
+      __setState: (s) => { state = s; },
+      __getState: () => state,
+    };
+  } else if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start);
   } else {
     start();

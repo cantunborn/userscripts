@@ -1,0 +1,12 @@
+{
+  "name": "userscripts",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "vitest run --config config/vitest.config.js"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.1",
+    "vitest": "^2.1.9"
+  }
+}
