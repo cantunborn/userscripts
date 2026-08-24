@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Reddit Remove Infinite Scroll
 // @namespace    https://github.com/cantunborn
-// @version      1.15
-// @description  Replace infinite scroll with Google-style numbered pages (25 posts per page) on Reddit feeds.
+// @version      1.16
+// @description  Replace infinite scroll with Old Reddit style pagination (25 posts per page) on Reddit feeds.
 // @author       cantunborn
 // @license      MIT
 // @homepageURL  https://github.com/cantunborn/userscripts
@@ -60,19 +60,19 @@
   let lastPath = null;
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
-  const CARET_PATH = 'M10 13.7a.897.897 0 01-.636-.264l-4.6-4.6a.9.9 0 111.272-1.273L10 11.526l3.964-3.963a.9.9 0 011.272 1.273l-4.6 4.6A.897.897 0 0110 13.7Z';
+  const CARET_LEFT_PATH = 'M6.3 10c0-.23.088-.46.264-.636l4.6-4.6a.9.9 0 111.273 1.272L8.474 10l3.963 3.964a.9.9 0 01-1.273 1.272l-4.6-4.6A.897.897 0 016.3 10Z';
+  const CARET_RIGHT_PATH = 'M13.7 10c0 .23-.088.46-.264.636l-4.6 4.6a.9.9 0 11-1.273-1.272L11.526 10 7.563 6.036a.9.9 0 011.273-1.272l4.6 4.6A.897.897 0 0113.7 10Z';
 
-  function makeCaretIcon(rotateDeg) {
+  function makeCaretIcon(path) {
     const svg = document.createElementNS(SVG_NS, 'svg');
     svg.setAttribute('fill', 'currentColor');
     svg.setAttribute('height', '16');
     svg.setAttribute('width', '16');
     svg.setAttribute('viewBox', '0 0 20 20');
-    svg.style.transform = `rotate(${rotateDeg}deg)`;
     svg.style.flexShrink = '0';
-    const path = document.createElementNS(SVG_NS, 'path');
-    path.setAttribute('d', CARET_PATH);
-    svg.appendChild(path);
+    const pathEl = document.createElementNS(SVG_NS, 'path');
+    pathEl.setAttribute('d', path);
+    svg.appendChild(pathEl);
     return svg;
   }
 
@@ -146,18 +146,10 @@
       entries.shift();
       serialized = JSON.stringify(entries);
     }
-    while (entries.length > 0) {
-      try {
-        sessionStorage.setItem(key, serialized);
-        return;
-      } catch (err) {
-        entries.shift();
-        if (entries.length === 0) {
-          log('appendToSnapshot: failed even after evicting everything', err);
-          return;
-        }
-        serialized = JSON.stringify(entries);
-      }
+    try {
+      sessionStorage.setItem(key, serialized);
+    } catch (err) {
+      log('appendToSnapshot: storage quota exceeded, leaving earlier snapshot in place', err);
     }
   }
 
@@ -213,8 +205,6 @@
       if (state.observer) state.observer.disconnect();
       if (state.pendingTimer) clearTimeout(state.pendingTimer);
       if (state.bar) state.bar.remove();
-      if (state.topBar) state.topBar.remove();
-      document.removeEventListener('click', onOutsidePopupClick, true);
       const sentinel = findSentinel();
       if (sentinel) sentinel.style.removeProperty('display');
       state.posts.forEach((p) => {
@@ -259,14 +249,11 @@
       feed,
       posts: [],
       currentPage: 1,
-      highestPage: 1,
       hasMore: true,
       loading: false,
       pendingTimer: null,
       pendingResolve: null,
       bar: null,
-      topBar: null,
-      openPopup: null,
       observer: null,
     };
 
@@ -312,7 +299,6 @@
     await ensureLoadedThrough(target);
     if (state.posts.length > (target - 1) * PAGE_SIZE) {
       state.currentPage = target;
-      state.highestPage = Math.max(state.highestPage, target);
     }
     log('init: done, currentPage is', state.currentPage, 'total posts', state.posts.length);
     reflow();
@@ -348,12 +334,8 @@
     return matches.length ? matches[matches.length - 1] : null;
   }
 
-  function getDividerBox(preferredWrapper) {
-    let hr = null;
-    if (preferredWrapper && preferredWrapper.nextElementSibling && preferredWrapper.nextElementSibling.tagName === 'HR') {
-      hr = preferredWrapper.nextElementSibling;
-    }
-    if (!hr) hr = state.feed.querySelector('article + hr') || state.feed.querySelector('hr');
+  function getDividerBox() {
+    const hr = state.feed.querySelector('article + hr') || state.feed.querySelector('hr');
     if (!hr) return null;
     const cs = getComputedStyle(hr);
     return { width: cs.width, marginLeft: cs.marginLeft, marginRight: cs.marginRight };
@@ -368,9 +350,7 @@
   }
 
   function positionBars() {
-    const start = (state.currentPage - 1) * PAGE_SIZE;
-    const topWrapper = wrapperOf(state.posts[start]);
-    const box = getDividerBox(topWrapper);
+    const box = getDividerBox();
 
     const lastPost = state.posts[state.posts.length - 1];
     const bottomWrapper = lastPost ? wrapperOf(lastPost) : null;
@@ -381,14 +361,6 @@
       state.feed.appendChild(state.bar);
     }
     hideTrailingElements();
-
-    const pages = Math.min(totalKnownPages(), state.highestPage);
-    if (pages > 1) {
-      topWrapper.insertAdjacentElement('beforebegin', state.topBar);
-      applyDividerBox(state.topBar, box);
-    } else if (state.topBar.isConnected) {
-      state.topBar.remove();
-    }
   }
 
   function hideTrailingElements() {
@@ -444,21 +416,14 @@
     log('ensureLoadedThrough: done, have', state.posts.length, 'hasMore', state.hasMore);
   }
 
-  function makeButton(label, enabled, onClick, current, isPageNumber) {
+  function makeButton(label, enabled, onClick) {
     const el = document.createElement('button');
     el.type = 'button';
     const labelSpan = document.createElement('span');
     labelSpan.className = 'flex items-center gap-xs';
-    if (isPageNumber) {
-      const num = document.createElement('faceplate-number');
-      num.setAttribute('pretty', '');
-      num.setAttribute('number', label);
-      labelSpan.appendChild(num);
-    } else {
-      labelSpan.textContent = label;
-    }
+    labelSpan.textContent = label;
     el.appendChild(labelSpan);
-    el.className = 'button button-small leading-none inline-flex items-center px-sm py-xs ' + (current ? 'button-primary' : 'button-secondary');
+    el.className = 'button button-small leading-none inline-flex items-center px-sm py-xs button-secondary';
     el.style.fontSize = 'var(--font-label-2-size, 12px)';
     if (!enabled) {
       el.disabled = true;
@@ -475,116 +440,21 @@
     return wrap;
   }
 
-  function renderPageList(pages, budget, barEl) {
-    const span = Math.min(2, Math.max(1, Math.floor((budget - 3) / 4)));
-    const EDGE = span;
-    const AROUND = span;
-    const cur = state.currentPage;
-
-    if (pages <= EDGE * 2 + AROUND * 2 + 3) {
-      for (let n = 1; n <= pages; n++) appendPageButton(n, barEl);
-      return;
-    }
-
-    for (let n = 1; n <= EDGE; n++) appendPageButton(n, barEl);
-
-    const midStart = Math.max(EDGE + 1, cur - AROUND);
-    const midEnd = Math.min(pages - EDGE, cur + AROUND);
-
-    if (midStart > EDGE + 1) appendEllipsis(EDGE + 1, midStart - 1, barEl);
-
-    for (let n = midStart; n <= midEnd; n++) appendPageButton(n, barEl);
-
-    if (midEnd < pages - EDGE) appendEllipsis(midEnd + 1, pages - EDGE, barEl);
-
-    for (let n = pages - EDGE + 1; n <= pages; n++) appendPageButton(n, barEl);
-  }
-
-  function appendPageButton(n, barEl) {
-    const isCurrent = n === state.currentPage;
-    const btn = makeButton(String(n), !isCurrent, () => goToPage(n), isCurrent, true);
-    barEl.appendChild(btn);
-  }
-
-  function appendEllipsis(rangeStart, rangeEnd, barEl) {
-    const wrap = document.createElement('span');
-    wrap.style.position = 'relative';
-    wrap.style.display = 'inline-flex';
-
-    const btn = makeButton('…', true, () => togglePagePopup(wrap, rangeStart, rangeEnd), false);
-    wrap.appendChild(btn);
-    barEl.appendChild(wrap);
-  }
-
-  function togglePagePopup(anchor, rangeStart, rangeEnd) {
-    const wasOpenHere = state.openPopup && anchor.contains(state.openPopup);
-    closeOpenPopup();
-    if (wasOpenHere) return;
-
-    const popup = document.createElement('div');
-    popup.setAttribute('data-reddit-paginate', 'popup');
-    applyPopupStyles(popup);
-
-    for (let n = rangeStart; n <= rangeEnd; n++) {
-      const isCurrent = n === state.currentPage;
-      const item = makeButton(String(n), !isCurrent, () => {
-        goToPage(n);
-        closeOpenPopup();
-      }, isCurrent, true);
-      popup.appendChild(item);
-    }
-
-    anchor.appendChild(popup);
-    state.openPopup = popup;
-
-    setTimeout(() => document.addEventListener('click', onOutsidePopupClick, true), 0);
-  }
-
-  function onOutsidePopupClick(e) {
-    if (state.openPopup && !state.openPopup.contains(e.target) && e.target.textContent !== '…') {
-      closeOpenPopup();
-    }
-  }
-
-  function closeOpenPopup() {
-    if (state.openPopup) {
-      state.openPopup.remove();
-      state.openPopup = null;
-    }
-    document.removeEventListener('click', onOutsidePopupClick, true);
-  }
-
-  function applyPopupStyles(el) {
-    el.style.position = 'absolute';
-    el.style.bottom = '100%';
-    el.style.left = '50%';
-    el.style.transform = 'translateX(-50%)';
-    el.style.marginBottom = '4px';
-    el.style.display = 'grid';
-    el.style.gridTemplateColumns = 'repeat(5, max-content)';
-    el.style.justifyItems = 'center';
-    el.style.gap = '4px';
-    el.style.padding = '8px';
-    el.style.background = 'var(--rp-bg)';
-    el.style.border = '1px solid var(--rp-border)';
-    el.style.borderRadius = '8px';
-    el.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.15)';
-    el.style.maxHeight = '160px';
-    el.style.overflowY = 'auto';
-    el.style.zIndex = '1000';
+  function buildPageLabel() {
+    const el = document.createElement('span');
+    el.className = 'whitespace-nowrap text-neutral-content-weak flex items-center';
+    el.textContent = 'page ' + state.currentPage;
+    return el;
   }
 
   function buildBarContents(barEl) {
     barEl.innerHTML = '';
 
-    const containerWidth = barEl.clientWidth || 400;
-    const numberBudget = Math.max(5, Math.floor((containerWidth - 170) / 44));
-
     const prevBtn = makeButton('prev', state.currentPage > 1, goPrev);
-    prevBtn.insertBefore(wrapIcon(makeCaretIcon(90), true), prevBtn.firstChild);
+    prevBtn.insertBefore(wrapIcon(makeCaretIcon(CARET_LEFT_PATH), true), prevBtn.firstChild);
     barEl.appendChild(prevBtn);
 
-    renderPageList(Math.min(totalKnownPages(), state.highestPage), numberBudget, barEl);
+    barEl.appendChild(buildPageLabel());
 
     const canAdvance = state.hasMore || state.posts.length > state.currentPage * PAGE_SIZE;
     const nextBtn = makeButton(
@@ -593,7 +463,7 @@
       goNext
     );
     if (!state.loading) {
-      nextBtn.appendChild(wrapIcon(makeCaretIcon(-90), false));
+      nextBtn.appendChild(wrapIcon(makeCaretIcon(CARET_RIGHT_PATH), false));
     }
     barEl.appendChild(nextBtn);
 
@@ -609,16 +479,11 @@
     if (!state.bar) {
       state.bar = document.createElement('div');
       state.bar.setAttribute('data-reddit-paginate', 'bar');
+      state.bar.className = 'gap-xs';
       applyBarStyles(state.bar);
-    }
-    if (!state.topBar) {
-      state.topBar = document.createElement('div');
-      state.topBar.setAttribute('data-reddit-paginate', 'bar-top');
-      applyBarStyles(state.topBar);
     }
     positionBars();
     buildBarContents(state.bar);
-    if (state.topBar.isConnected) buildBarContents(state.topBar);
   }
 
   function scrollToTopOfFeed() {
@@ -634,14 +499,6 @@
     scrollToTopOfFeed();
   }
 
-  function goToPage(n) {
-    if (n === state.currentPage) return;
-    state.currentPage = n;
-    saveCurrentPage();
-    reflow();
-    scrollToTopOfFeed();
-  }
-
   async function goNext() {
     if (state.loading) return;
     const target = state.currentPage + 1;
@@ -649,7 +506,6 @@
 
     if (state.posts.length > (target - 1) * PAGE_SIZE) {
       state.currentPage = target;
-      state.highestPage = Math.max(state.highestPage, target);
       saveCurrentPage();
     }
     reflow();
@@ -664,7 +520,6 @@
     el.style.width = '100%';
     el.style.maxWidth = '100%';
     el.style.boxSizing = 'border-box';
-    el.style.gap = '4px';
     el.style.padding = '16px 8px';
     el.style.fontFamily = 'inherit';
     el.style.fontSize = 'var(--font-label-2-size, 14px)';
@@ -682,8 +537,6 @@
     style.id = 'reddit-paginate-vars';
     style.textContent = `
       :root {
-        --rp-bg: var(--color-neutral-background, #ffffff);
-        --rp-border: var(--color-neutral-border, #edeff1);
         --rp-fg-disabled: var(--color-neutral-content-weak, #9b9ba1);
       }
       faceplate-partial[slot="load-after"] {
