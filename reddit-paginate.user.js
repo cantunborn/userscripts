@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Remove Infinite Scroll
 // @namespace    https://github.com/cantunborn
-// @version      1.20
+// @version      1.21
 // @description  Replace infinite scroll with Old Reddit style pagination (25 posts per page) on Reddit feeds.
 // @author       cantunborn
 // @license      MIT
@@ -79,6 +79,7 @@
 
   let state = null;
   let lastPath = null;
+  let sawPopState = false;
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const CARET_LEFT_PATH = 'M6.3 10c0-.23.088-.46.264-.636l4.6-4.6a.9.9 0 111.273 1.272L8.474 10l3.963 3.964a.9.9 0 01-1.273 1.272l-4.6-4.6A.897.897 0 016.3 10Z';
@@ -266,7 +267,8 @@
 
   async function init(feed, posts) {
     log('init: starting with', posts.length, 'posts');
-    const navType = navigationType();
+    const navType = navigationType() === 'back_forward' || sawPopState ? 'back_forward' : 'navigate';
+    sawPopState = false;
 
     state = {
       feed,
@@ -654,6 +656,11 @@
 
     PAGE_SIZE_OPTIONS.forEach((size) => menu.appendChild(buildPageSizeMenuItem(size)));
 
+    const tooltip = document.createElement('rpl-tooltip');
+    tooltip.setAttribute('appearance', 'inverted');
+    tooltip.setAttribute('trigger', 'hover focus-visible');
+    tooltip.setAttribute('placement', 'bottom');
+
     button.addEventListener('click', (e) => {
       e.stopPropagation();
       const isOpen = pageSizeMenuOpen && pageSizeMenuOpen.wrapper === wrapper;
@@ -665,10 +672,6 @@
       }
     });
 
-    const tooltip = document.createElement('rpl-tooltip');
-    tooltip.setAttribute('appearance', 'inverted');
-    tooltip.setAttribute('trigger', 'hover focus-visible');
-    tooltip.setAttribute('placement', 'bottom');
     tooltip.appendChild(button);
     const tooltipContent = document.createElement('span');
     tooltipContent.setAttribute('slot', 'content');
@@ -748,6 +751,9 @@
 
   function start() {
     injectThemeVars();
+    window.addEventListener('popstate', () => {
+      sawPopState = true;
+    });
     scheduleInit();
     watchNavigation();
   }
@@ -783,6 +789,7 @@
       __getState: () => state,
       __setPageSize: (n) => { PAGE_SIZE = n; },
       __getPageSize: () => PAGE_SIZE,
+      __setSawPopState: (v) => { sawPopState = v; },
     };
   } else if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start);

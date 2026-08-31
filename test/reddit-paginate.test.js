@@ -264,6 +264,45 @@ describe('navigationType', () => {
   });
 });
 
+describe('back/forward restore via popstate', () => {
+  it('restores the saved page on a popstate even though navigationType stays "navigate"', async () => {
+    makeFeed(30);
+    rp.__setPageSize(5);
+    rp.__setState({ currentPage: 3 });
+    rp.saveCurrentPage();
+    rp.__setState(null);
+
+    const original = performance.getEntriesByType;
+    performance.getEntriesByType = () => [{ type: 'navigate' }];
+    rp.__setSawPopState(true);
+
+    rp.scheduleInit();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(rp.__getState().currentPage).toBe(3);
+    performance.getEntriesByType = original;
+  });
+
+  it('resets to page 1 on a normal forward navigation, with no popstate seen', async () => {
+    makeFeed(30);
+    rp.__setPageSize(5);
+    rp.__setState({ currentPage: 3 });
+    rp.saveCurrentPage();
+    rp.__setState(null);
+
+    const original = performance.getEntriesByType;
+    performance.getEntriesByType = () => [{ type: 'navigate' }];
+
+    rp.scheduleInit();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(rp.__getState().currentPage).toBe(1);
+    performance.getEntriesByType = original;
+  });
+});
+
 describe('page size storage', () => {
   it('defaults to 25 when nothing is saved', () => {
     expect(rp.readSavedPageSize()).toBe(25);
