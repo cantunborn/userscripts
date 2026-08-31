@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Remove Infinite Scroll
 // @namespace    https://github.com/cantunborn
-// @version      1.16
+// @version      1.20
 // @description  Replace infinite scroll with Old Reddit style pagination (25 posts per page) on Reddit feeds.
 // @author       cantunborn
 // @license      MIT
@@ -53,7 +53,28 @@
     window.IntersectionObserver.prototype = NativeIntersectionObserver.prototype;
   }
 
-  const PAGE_SIZE = 25;
+  const PAGE_SIZE_OPTIONS = [5, 10, 15, 20, 25];
+  const PAGE_SIZE_STORAGE_KEY = 'reddit-paginate:pageSize';
+
+  function readSavedPageSize() {
+    try {
+      const n = parseInt(localStorage.getItem(PAGE_SIZE_STORAGE_KEY), 10);
+      return PAGE_SIZE_OPTIONS.includes(n) ? n : 25;
+    } catch (err) {
+      log('readSavedPageSize: failed', err);
+      return 25;
+    }
+  }
+
+  function savePageSize(n) {
+    try {
+      localStorage.setItem(PAGE_SIZE_STORAGE_KEY, String(n));
+    } catch (err) {
+      log('savePageSize: failed', err);
+    }
+  }
+
+  let PAGE_SIZE = readSavedPageSize();
   const LOAD_TIMEOUT_MS = 8000;
 
   let state = null;
@@ -62,6 +83,7 @@
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const CARET_LEFT_PATH = 'M6.3 10c0-.23.088-.46.264-.636l4.6-4.6a.9.9 0 111.273 1.272L8.474 10l3.963 3.964a.9.9 0 01-1.273 1.272l-4.6-4.6A.897.897 0 016.3 10Z';
   const CARET_RIGHT_PATH = 'M13.7 10c0 .23-.088.46-.264.636l-4.6 4.6a.9.9 0 11-1.273-1.272L11.526 10 7.563 6.036a.9.9 0 011.273-1.272l4.6 4.6A.897.897 0 0113.7 10Z';
+  const CARET_DOWN_PATH = 'M10 13.7a.897.897 0 01-.636-.264l-4.6-4.6a.9.9 0 111.272-1.273L10 11.526l3.964-3.963a.9.9 0 011.272 1.273l-4.6 4.6A.897.897 0 0110 13.7Z';
 
   function makeCaretIcon(path) {
     const svg = document.createElementNS(SVG_NS, 'svg');
@@ -221,6 +243,7 @@
     const prevFirstPostId = state && state.posts[0] ? state.posts[0].id : null;
     teardown();
     if (!isListingPath(location.pathname)) return;
+    schedulePageSizeControl();
 
     let tries = 0;
     const tryInit = () => {
@@ -512,6 +535,170 @@
     scrollToTopOfFeed();
   }
 
+  let pageSizeMenuOpen = null;
+
+  function closePageSizeMenu() {
+    if (!pageSizeMenuOpen) return;
+    pageSizeMenuOpen.menu.style.display = 'none';
+    pageSizeMenuOpen.button.setAttribute('aria-expanded', 'false');
+    pageSizeMenuOpen = null;
+  }
+
+  document.addEventListener('click', (e) => {
+    if (pageSizeMenuOpen && !pageSizeMenuOpen.wrapper.contains(e.target)) closePageSizeMenu();
+  });
+
+  const pageSizeLabels = new Set();
+  const pageSizeRows = new Set();
+
+  function applyPageSizeChange(newSize) {
+    if (newSize === PAGE_SIZE) return;
+    const firstVisibleIndex = state ? (state.currentPage - 1) * PAGE_SIZE : 0;
+    PAGE_SIZE = newSize;
+    savePageSize(newSize);
+    pageSizeLabels.forEach((el) => {
+      if (!el.isConnected) {
+        pageSizeLabels.delete(el);
+        return;
+      }
+      el.textContent = PAGE_SIZE + ' per page';
+    });
+    pageSizeRows.forEach((row) => {
+      if (!row.isConnected) {
+        pageSizeRows.delete(row);
+        return;
+      }
+      const selected = Number(row.dataset.pageSize) === PAGE_SIZE;
+      row.classList.toggle('bg-neutral-background-selected', selected);
+      row.classList.toggle('hover:bg-neutral-background-selected', selected);
+      row.classList.toggle('hover:text-secondary-plain-hover', !selected);
+      row.classList.toggle('active:bg-interactive-pressed', !selected);
+      row.parentElement.toggleAttribute('rpl-selected', selected);
+    });
+    if (!state) return;
+    const target = Math.floor(firstVisibleIndex / PAGE_SIZE) + 1;
+    ensureLoadedThrough(target).then(() => {
+      if (state.posts.length > (target - 1) * PAGE_SIZE) {
+        state.currentPage = target;
+        saveCurrentPage();
+      }
+      reflow();
+    });
+  }
+
+  function buildPageSizeMenuItem(size) {
+    const li = document.createElement('li');
+    li.className = 'relative list-none mt-0';
+    li.setAttribute('role', 'presentation');
+    if (size === PAGE_SIZE) li.setAttribute('rpl-selected', '');
+    const row = document.createElement('a');
+    const selected = size === PAGE_SIZE;
+    row.className =
+      'flex justify-between relative px-md gap-xs text-secondary-plain' +
+      (selected
+        ? ' bg-neutral-background-selected hover:bg-neutral-background-selected'
+        : ' hover:text-secondary-plain-hover active:bg-interactive-pressed') +
+      ' hover:bg-neutral-background-hover hover:no-underline cursor-pointer py-xs -outline-offset-1 no-underline';
+    row.style.paddingInlineEnd = '16px';
+    row.tabIndex = -1;
+    row.dataset.pageSize = size;
+    pageSizeRows.add(row);
+    const text = document.createElement('span');
+    text.className = 'flex flex-col justify-center min-w-0 shrink py-[0.375rem]';
+    const textInner = document.createElement('span');
+    textInner.className = 'text-body-2';
+    textInner.textContent = size + ' per page';
+    text.appendChild(textInner);
+    row.appendChild(text);
+    row.addEventListener('click', (e) => {
+      e.preventDefault();
+      applyPageSizeChange(size);
+      closePageSizeMenu();
+    });
+    li.appendChild(row);
+    return li;
+  }
+
+  function buildPageSizeControl() {
+    const wrapper = document.createElement('div');
+    wrapper.style.position = 'relative';
+    wrapper.style.display = 'inline-flex';
+    wrapper.setAttribute('data-reddit-paginate', 'page-size');
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className =
+      'text-neutral-content-weak button-small px-[calc(var(--rem10)-var(--button-border-width,0px))] button-plain items-center justify-center button inline-flex';
+    button.setAttribute('aria-haspopup', 'true');
+    button.setAttribute('aria-expanded', 'false');
+    button.setAttribute('aria-label', 'Posts per page');
+
+    const label = document.createElement('span');
+    label.className = 'flex items-center gap-xs';
+    label.textContent = PAGE_SIZE + ' per page';
+    pageSizeLabels.add(label);
+    button.appendChild(label);
+    button.appendChild(wrapIcon(makeCaretIcon(CARET_DOWN_PATH), false));
+
+    const menu = document.createElement('ul');
+    menu.setAttribute('role', 'menu');
+    menu.className = 'overflow-y-auto max-h-[50vh]';
+    menu.style.cssText =
+      'display:none;position:absolute;top:100%;left:50%;transform:translateX(-50%);margin-top:4px;min-width:140px;' +
+      'background:var(--color-neutral-background,#fff);border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.2);' +
+      'z-index:100;padding:4px 0;list-style:none;';
+    const header = document.createElement('div');
+    header.className = 'font-semibold m-md mb-xs';
+    header.textContent = 'Posts count';
+    menu.appendChild(header);
+
+    PAGE_SIZE_OPTIONS.forEach((size) => menu.appendChild(buildPageSizeMenuItem(size)));
+
+    button.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isOpen = pageSizeMenuOpen && pageSizeMenuOpen.wrapper === wrapper;
+      closePageSizeMenu();
+      if (!isOpen) {
+        menu.style.display = 'block';
+        button.setAttribute('aria-expanded', 'true');
+        pageSizeMenuOpen = { wrapper, menu, button };
+      }
+    });
+
+    const tooltip = document.createElement('rpl-tooltip');
+    tooltip.setAttribute('appearance', 'inverted');
+    tooltip.setAttribute('trigger', 'hover focus-visible');
+    tooltip.setAttribute('placement', 'bottom');
+    tooltip.appendChild(button);
+    const tooltipContent = document.createElement('span');
+    tooltipContent.setAttribute('slot', 'content');
+    tooltipContent.textContent = 'Change number of posts in feed';
+    tooltip.appendChild(tooltipContent);
+
+    wrapper.appendChild(tooltip);
+    wrapper.appendChild(menu);
+    return wrapper;
+  }
+
+  function ensurePageSizeControl() {
+    const viewDropdowns = document.querySelectorAll('shreddit-sort-dropdown[sort-event="layout-view-change"]');
+    viewDropdowns.forEach((viewDropdown) => {
+      const parent = viewDropdown.parentElement;
+      if (!parent) return;
+      if (parent.querySelector(':scope > [data-reddit-paginate="page-size"]')) return;
+      parent.appendChild(buildPageSizeControl());
+    });
+  }
+
+  let pageSizeControlObserver = null;
+
+  function schedulePageSizeControl() {
+    ensurePageSizeControl();
+    if (pageSizeControlObserver) return;
+    pageSizeControlObserver = new MutationObserver(() => ensurePageSizeControl());
+    pageSizeControlObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
   function applyBarStyles(el) {
     el.style.display = 'flex';
     el.style.flexWrap = 'nowrap';
@@ -586,8 +773,16 @@
       totalKnownPages,
       applyVisibility,
       wrapperOf,
+      PAGE_SIZE_OPTIONS,
+      readSavedPageSize,
+      savePageSize,
+      applyPageSizeChange,
+      ensurePageSizeControl,
+      schedulePageSizeControl,
       __setState: (s) => { state = s; },
       __getState: () => state,
+      __setPageSize: (n) => { PAGE_SIZE = n; },
+      __getPageSize: () => PAGE_SIZE,
     };
   } else if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', start);

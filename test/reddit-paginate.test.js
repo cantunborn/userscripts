@@ -1,3 +1,15 @@
+// Node's own experimental global `localStorage` shadows jsdom's window.localStorage
+// and stays disabled without a --localstorage-file flag, so polyfill it here.
+if (typeof globalThis.localStorage === 'undefined' || typeof globalThis.localStorage.setItem !== 'function') {
+  const store = new Map();
+  global.localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+    clear: () => store.clear(),
+  };
+}
+
 const rp = require('../reddit-paginate.user.js');
 
 function makePost(id, extraHtml) {
@@ -11,11 +23,23 @@ function makePost(id, extraHtml) {
   return post;
 }
 
+function makeSortDropdown(headerText, sortEvent) {
+  const el = document.createElement('shreddit-sort-dropdown');
+  el.setAttribute('header-text', headerText);
+  el.setAttribute('sort-event', sortEvent);
+  const parent = document.createElement('div');
+  parent.appendChild(el);
+  document.body.appendChild(parent);
+  return el;
+}
+
 beforeEach(() => {
   sessionStorage.clear();
+  localStorage.clear();
   document.body.innerHTML = '';
   window.history.pushState({}, '', '/r/test/');
   rp.__setState(null);
+  rp.__setPageSize(25);
 });
 
 describe('storage keys', () => {
@@ -237,5 +261,123 @@ describe('navigationType', () => {
     };
     expect(rp.navigationType()).toBe('navigate');
     performance.getEntriesByType = original;
+  });
+});
+
+describe('page size storage', () => {
+  it('defaults to 25 when nothing is saved', () => {
+    expect(rp.readSavedPageSize()).toBe(25);
+  });
+
+  it('round-trips a saved value', () => {
+    rp.savePageSize(10);
+    expect(rp.readSavedPageSize()).toBe(10);
+  });
+
+  it('falls back to 25 for a value outside the allowed options', () => {
+    localStorage.setItem('reddit-paginate:pageSize', '999');
+    expect(rp.readSavedPageSize()).toBe(25);
+  });
+});
+
+describe('applyVisibility with page size', () => {
+  it('shows only the first PAGE_SIZE posts on page 1', () => {
+    const posts = Array.from({ length: 12 }, (_, i) => makePost('t3_' + i));
+    rp.__setPageSize(5);
+    rp.__setState({ posts, currentPage: 1 });
+    rp.applyVisibility();
+
+    const visible = posts.filter((p) => rp.wrapperOf(p).style.display !== 'none');
+    expect(visible.map((p) => p.id)).toEqual(['t3_0', 't3_1', 't3_2', 't3_3', 't3_4']);
+  });
+
+  it('changes how many posts are visible when the page size changes', () => {
+    const posts = Array.from({ length: 12 }, (_, i) => makePost('t3_' + i));
+    rp.__setState({ posts, currentPage: 1 });
+
+    rp.__setPageSize(5);
+    rp.applyVisibility();
+    expect(posts.filter((p) => rp.wrapperOf(p).style.display !== 'none')).toHaveLength(5);
+
+    rp.__setPageSize(10);
+    rp.applyVisibility();
+    expect(posts.filter((p) => rp.wrapperOf(p).style.display !== 'none')).toHaveLength(10);
+  });
+});
+
+describe('applyPageSizeChange', () => {
+  it('updates PAGE_SIZE, persists it, and actually changes how many posts show in the feed', async () => {
+    const posts = Array.from({ length: 25 }, (_, i) => makePost('t3_' + i));
+    rp.__setState({
+      posts,
+      currentPage: 1,
+      hasMore: false,
+      loading: false,
+      bar: null,
+      feed: document.body,
+    });
+
+    await rp.applyPageSizeChange(5);
+
+    expect(rp.__getPageSize()).toBe(5);
+    expect(rp.readSavedPageSize()).toBe(5);
+    const visible = posts.filter((p) => rp.wrapperOf(p).style.display !== 'none');
+    expect(visible).toHaveLength(5);
+  });
+
+  it('does nothing when the requested size matches the current one', async () => {
+    rp.__setState({ posts: [], currentPage: 1 });
+    rp.__setPageSize(10);
+    await rp.applyPageSizeChange(10);
+    expect(rp.__getPageSize()).toBe(10);
+  });
+});
+
+describe('ensurePageSizeControl', () => {
+  it('attaches next to the View dropdown, not the Sort dropdown', () => {
+    makeSortDropdown('Sort by', 'feed-sort-change');
+    const view = makeSortDropdown('View', 'layout-view-change');
+
+    rp.ensurePageSizeControl();
+
+    const sortParent = document.querySelectorAll('shreddit-sort-dropdown')[0].parentElement;
+    expect(sortParent.querySelector('[data-reddit-paginate="page-size"]')).toBeNull();
+    expect(view.parentElement.querySelector('[data-reddit-paginate="page-size"]')).not.toBeNull();
+  });
+
+  it('does not insert a second control next to the same dropdown', () => {
+    const view = makeSortDropdown('View', 'layout-view-change');
+    rp.ensurePageSizeControl();
+    rp.ensurePageSizeControl();
+    expect(view.parentElement.querySelectorAll('[data-reddit-paginate="page-size"]')).toHaveLength(1);
+  });
+
+  it('inserts a control next to every View dropdown when Reddit renders more than one', () => {
+    const viewA = makeSortDropdown('View', 'layout-view-change');
+    const viewB = makeSortDropdown('View', 'layout-view-change');
+
+    rp.ensurePageSizeControl();
+
+    expect(viewA.parentElement.querySelector('[data-reddit-paginate="page-size"]')).not.toBeNull();
+    expect(viewB.parentElement.querySelector('[data-reddit-paginate="page-size"]')).not.toBeNull();
+  });
+});
+
+describe('schedulePageSizeControl', () => {
+  it('re-inserts the control after the View dropdown is replaced (SPA navigation)', async () => {
+    const view = makeSortDropdown('View', 'layout-view-change');
+    rp.schedulePageSizeControl();
+    expect(view.parentElement.querySelector('[data-reddit-paginate="page-size"]')).not.toBeNull();
+
+    const parent = view.parentElement;
+    parent.removeChild(view);
+    const replacement = document.createElement('shreddit-sort-dropdown');
+    replacement.setAttribute('header-text', 'View');
+    replacement.setAttribute('sort-event', 'layout-view-change');
+    parent.appendChild(replacement);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(parent.querySelector('[data-reddit-paginate="page-size"]')).not.toBeNull();
   });
 });
