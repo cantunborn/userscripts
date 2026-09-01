@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Reddit Remove Infinite Scroll
 // @namespace    https://github.com/cantunborn
-// @version      1.21
+// @version      1.25
 // @description  Replace infinite scroll with Old Reddit style pagination (25 posts per page) on Reddit feeds.
 // @author       cantunborn
 // @license      MIT
@@ -80,6 +80,7 @@
   let state = null;
   let lastPath = null;
   let sawPopState = false;
+  let initGeneration = 0;
 
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const CARET_LEFT_PATH = 'M6.3 10c0-.23.088-.46.264-.636l4.6-4.6a.9.9 0 111.273 1.272L8.474 10l3.963 3.964a.9.9 0 01-1.273 1.272l-4.6-4.6A.897.897 0 016.3 10Z';
@@ -163,7 +164,10 @@
   function appendToSnapshot(post) {
     const key = snapshotStorageKey();
     const entries = loadSnapshot();
-    entries.push({ id: post.id, html: wrapperOf(post).outerHTML });
+    const wrapper = wrapperOf(post);
+    const sib = wrapper.nextElementSibling;
+    const hrHtml = sib && sib.tagName === 'HR' ? sib.outerHTML : '';
+    entries.push({ id: post.id, html: wrapper.outerHTML + hrHtml });
     let serialized = JSON.stringify(entries);
     while (serialized.length > MAX_SNAPSHOT_BYTES && entries.length > 1) {
       entries.shift();
@@ -191,23 +195,44 @@
     const template = document.createElement('template');
     const restoredWrappers = [];
     const restoredPosts = [];
+    let referenceHrHtml = null;
     for (const entry of entries) {
       template.innerHTML = entry.html;
       const wrapper = template.content.firstElementChild;
       if (!wrapper) continue;
       const post = wrapper.matches('shreddit-post') ? wrapper : wrapper.querySelector('shreddit-post');
       if (!post) continue;
-      restoredWrappers.push(wrapper);
+      const hrSib = wrapper.nextElementSibling;
+      const hr = hrSib && hrSib.tagName === 'HR' ? hrSib : null;
+      if (hr && !referenceHrHtml) referenceHrHtml = hr.outerHTML;
+      restoredWrappers.push({ wrapper, hr });
       restoredPosts.push(post);
     }
     if (!restoredPosts.length) return null;
 
-    feed.querySelectorAll('shreddit-post').forEach((p) => wrapperOf(p).remove());
+    restoredWrappers.forEach((entry, i) => {
+      if (entry.hr || i === restoredWrappers.length - 1) return;
+      const hrTemplate = document.createElement('template');
+      hrTemplate.innerHTML = referenceHrHtml || '<hr>';
+      entry.hr = hrTemplate.content.firstElementChild;
+    });
+
+    feed.querySelectorAll('shreddit-post').forEach((p) => {
+      const wrapper = wrapperOf(p);
+      const sib = wrapper.nextElementSibling;
+      if (sib && sib.tagName === 'HR') sib.remove();
+      wrapper.remove();
+    });
 
     const sentinel = feed.querySelector('faceplate-partial[slot="load-after"]');
-    restoredWrappers.forEach((wrapper) => {
-      if (sentinel) sentinel.insertAdjacentElement('beforebegin', wrapper);
-      else feed.appendChild(wrapper);
+    restoredWrappers.forEach(({ wrapper, hr }) => {
+      if (sentinel) {
+        sentinel.insertAdjacentElement('beforebegin', wrapper);
+        if (hr) sentinel.insertAdjacentElement('beforebegin', hr);
+      } else {
+        feed.appendChild(wrapper);
+        if (hr) feed.appendChild(hr);
+      }
     });
     return restoredPosts;
   }
@@ -227,6 +252,7 @@
     if (state) {
       if (state.observer) state.observer.disconnect();
       if (state.pendingTimer) clearTimeout(state.pendingTimer);
+      if (state.pendingResolve) state.pendingResolve();
       if (state.bar) state.bar.remove();
       const sentinel = findSentinel();
       if (sentinel) sentinel.style.removeProperty('display');
@@ -240,6 +266,7 @@
   }
 
   function scheduleInit() {
+    const generation = ++initGeneration;
     const prevFeed = state ? state.feed : null;
     const prevFirstPostId = state && state.posts[0] ? state.posts[0].id : null;
     teardown();
@@ -248,11 +275,15 @@
 
     let tries = 0;
     const tryInit = () => {
+      if (generation !== initGeneration) {
+        log('scheduleInit: superseded by a newer call, aborting');
+        return;
+      }
       const feed = document.querySelector('shreddit-feed');
       const posts = feed ? Array.from(feed.querySelectorAll('shreddit-post')) : [];
       const stale = feed && feed === prevFeed && posts[0] && posts[0].id === prevFirstPostId;
       if (feed && posts.length > 0 && !stale) {
-        init(feed, posts);
+        init(feed, posts, generation);
         return;
       }
       tries++;
@@ -265,7 +296,7 @@
     tryInit();
   }
 
-  async function init(feed, posts) {
+  async function init(feed, posts, generation) {
     log('init: starting with', posts.length, 'posts');
     const navType = navigationType() === 'back_forward' || sawPopState ? 'back_forward' : 'navigate';
     sawPopState = false;
@@ -294,14 +325,21 @@
 
     state.observer = new MutationObserver((mutations) => {
       let added = false;
+      let styleReset = false;
       for (const m of mutations) {
+        if (m.type === 'attributes') {
+          styleReset = true;
+          continue;
+        }
         for (const node of m.addedNodes) {
           if (node.nodeType !== 1) continue;
           if (node.tagName === 'SHREDDIT-POST') {
             if (registerPost(node)) added = true;
+            else discardDuplicatePost(node);
           } else if (node.querySelectorAll) {
             node.querySelectorAll('shreddit-post').forEach((p) => {
               if (registerPost(p)) added = true;
+              else discardDuplicatePost(p);
             });
           }
         }
@@ -314,16 +352,30 @@
           state.pendingResolve = null;
           resolve();
         }
+      } else if (styleReset && visibilityIsStale()) {
+        log('observer: external style reset detected on a tracked post, re-applying visibility');
+        applyVisibility();
       }
     });
-    state.observer.observe(feed, { childList: true, subtree: true });
+    state.observer.observe(feed, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['style'],
+    });
 
     const savedPage = navType === 'back_forward' ? readSavedPage() : null;
     const target = savedPage || 1;
+    state.currentPage = target;
+    applyVisibility();
     log('init: savedPage is', savedPage, 'target is', target);
     await ensureLoadedThrough(target);
-    if (state.posts.length > (target - 1) * PAGE_SIZE) {
-      state.currentPage = target;
+    if (generation !== initGeneration) {
+      log('init: superseded during load, aborting');
+      return;
+    }
+    if (state.posts.length <= (target - 1) * PAGE_SIZE) {
+      state.currentPage = 1;
     }
     log('init: done, currentPage is', state.currentPage, 'total posts', state.posts.length);
     reflow();
@@ -336,6 +388,14 @@
     return true;
   }
 
+  function discardDuplicatePost(node) {
+    if (!state || state.posts.includes(node)) return;
+    const wrapper = wrapperOf(node);
+    const sib = wrapper.nextElementSibling;
+    if (sib && sib.tagName === 'HR') sib.remove();
+    wrapper.remove();
+  }
+
   function totalKnownPages() {
     return Math.max(1, Math.ceil(state.posts.length / PAGE_SIZE));
   }
@@ -346,17 +406,30 @@
     state.posts.forEach((p, i) => setVisible(p, i >= start && i < end));
   }
 
+  function visibilityIsStale() {
+    const start = (state.currentPage - 1) * PAGE_SIZE;
+    const end = start + PAGE_SIZE;
+    return state.posts.some((p, i) => {
+      const shouldBeVisible = i >= start && i < end;
+      const isHidden = wrapperOf(p).style.display === 'none';
+      return shouldBeVisible === isHidden;
+    });
+  }
+
   function reflow() {
     applyVisibility();
     renderBars();
   }
 
   function findSentinel() {
-    const matches = state.feed.querySelectorAll('faceplate-partial[slot="load-after"]');
+    const matches = Array.from(state.feed.querySelectorAll('faceplate-partial[slot="load-after"]'));
     if (matches.length > 1) {
-      log('findSentinel: found', matches.length, 'sentinels, using last:', matches[matches.length - 1].id);
+      log('findSentinel: found', matches.length, 'sentinels');
     }
-    return matches.length ? matches[matches.length - 1] : null;
+    for (let i = matches.length - 1; i >= 0; i--) {
+      if (typeof matches[i].loadContent === 'function') return matches[i];
+    }
+    return null;
   }
 
   function getDividerBox() {
@@ -407,10 +480,25 @@
     });
   }
 
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function findSentinelWithRetry(tries, delayMs) {
+    for (let i = 0; i < tries; i++) {
+      if (!state) return null;
+      const sentinel = findSentinel();
+      if (sentinel) return sentinel;
+      await sleep(delayMs);
+    }
+    return null;
+  }
+
   async function requestNextBatch() {
-    const sentinel = findSentinel();
+    const sentinel = await findSentinelWithRetry(10, 100);
+    if (!state) return;
     if (!sentinel) {
-      log('requestNextBatch: no sentinel found, stopping');
+      log('requestNextBatch: no upgraded sentinel found after retrying, stopping');
       state.hasMore = false;
       return;
     }
@@ -423,6 +511,7 @@
       log('requestNextBatch: loadContent threw', err);
     }
     await waitPromise;
+    if (!state) return;
     log('requestNextBatch: after count', state.posts.length);
     if (state.posts.length === before) {
       log('requestNextBatch: count unchanged, marking hasMore false');
@@ -432,11 +521,12 @@
 
   async function ensureLoadedThrough(page) {
     const needed = page * PAGE_SIZE;
-    while (state.posts.length < needed && state.hasMore) {
+    while (state && state.posts.length < needed && state.hasMore) {
       state.loading = true;
       renderBars();
       await requestNextBatch();
     }
+    if (!state) return;
     state.loading = false;
     log('ensureLoadedThrough: done, have', state.posts.length, 'hasMore', state.hasMore);
   }
@@ -774,6 +864,7 @@
       clearSnapshot,
       restoreFromSnapshot,
       registerPost,
+      discardDuplicatePost,
       scheduleInit,
       watchNavigation,
       totalKnownPages,
@@ -785,6 +876,7 @@
       applyPageSizeChange,
       ensurePageSizeControl,
       schedulePageSizeControl,
+      requestNextBatch,
       __setState: (s) => { state = s; },
       __getState: () => state,
       __setPageSize: (n) => { PAGE_SIZE = n; },

@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "allowJs": true,
+    "checkJs": false,
+    "lib": ["es2022", "dom"]
+  },
+  "include": ["*.js", "test/**/*.js"]
+}

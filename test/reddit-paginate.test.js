@@ -157,6 +157,103 @@ describe('restoreFromSnapshot', () => {
   });
 });
 
+describe('requestNextBatch sentinel retry', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('retries until the sentinel is upgraded with a callable loadContent, then loads more', async () => {
+    const feed = document.createElement('shreddit-feed');
+    document.body.appendChild(feed);
+    const post = document.createElement('shreddit-post');
+    post.id = 't3_a';
+    feed.appendChild(post);
+
+    const sentinel = document.createElement('faceplate-partial');
+    sentinel.setAttribute('slot', 'load-after');
+    feed.appendChild(sentinel);
+
+    rp.__setState({ feed, posts: [post], currentPage: 1, hasMore: true });
+
+    vi.useFakeTimers();
+    const donePromise = rp.requestNextBatch();
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(rp.__getState().hasMore).toBe(true);
+
+    sentinel.loadContent = () => {
+      const newPost = document.createElement('shreddit-post');
+      newPost.id = 't3_b';
+      rp.__getState().posts.push(newPost);
+      if (rp.__getState().pendingResolve) rp.__getState().pendingResolve();
+    };
+    await vi.advanceTimersByTimeAsync(250);
+    await donePromise;
+
+    expect(rp.__getState().hasMore).toBe(true);
+    expect(rp.__getState().posts.length).toBe(2);
+  });
+
+  it('gives up and sets hasMore false if no sentinel ever becomes callable', async () => {
+    const feed = document.createElement('shreddit-feed');
+    document.body.appendChild(feed);
+    const sentinel = document.createElement('faceplate-partial');
+    sentinel.setAttribute('slot', 'load-after');
+    feed.appendChild(sentinel);
+
+    rp.__setState({ feed, posts: [], currentPage: 1, hasMore: true });
+
+    vi.useFakeTimers();
+    const donePromise = rp.requestNextBatch();
+    await vi.advanceTimersByTimeAsync(1500);
+    await donePromise;
+
+    expect(rp.__getState().hasMore).toBe(false);
+  });
+});
+
+describe('scheduleInit race guard', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('only runs init once when a second scheduleInit call arrives while both are still polling for the feed', async () => {
+    const logSpy = vi.spyOn(console, 'log');
+
+    vi.useFakeTimers();
+    rp.scheduleInit();
+    await vi.advanceTimersByTimeAsync(100);
+    rp.scheduleInit();
+    await vi.advanceTimersByTimeAsync(100);
+    makeFeed(10);
+    await vi.advanceTimersByTimeAsync(500);
+    vi.useRealTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const startCount = logSpy.mock.calls.filter((args) => args[1] === 'init: starting with').length;
+    expect(startCount).toBe(1);
+    logSpy.mockRestore();
+  });
+
+  it('does not throw when scheduleInit tears down state while an earlier init is still awaiting a load', async () => {
+    const feed = makeFeed(3);
+    rp.__setPageSize(5);
+
+    vi.useFakeTimers();
+    rp.scheduleInit();
+    await vi.advanceTimersByTimeAsync(150);
+
+    rp.scheduleInit();
+    await vi.advanceTimersByTimeAsync(1500);
+    vi.useRealTimers();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(feed.isConnected).toBe(true);
+  });
+});
+
 describe('page math', () => {
   it('slices posts into pages of 25 and hides the rest', () => {
     const posts = [];
@@ -300,6 +397,27 @@ describe('back/forward restore via popstate', () => {
 
     expect(rp.__getState().currentPage).toBe(1);
     performance.getEntriesByType = original;
+  });
+});
+
+describe('external style resets on tracked posts', () => {
+  it('re-hides a post whose inline display gets cleared by something else', async () => {
+    const feed = makeFeed(30);
+    rp.__setPageSize(5);
+
+    rp.scheduleInit();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const hiddenPost = feed.querySelector('#t3_10');
+    const wrapper = hiddenPost.closest('article');
+    expect(wrapper.style.display).toBe('none');
+
+    wrapper.style.display = '';
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(wrapper.style.display).toBe('none');
   });
 });
 
